@@ -1,0 +1,22 @@
+[project]
+name = "cs2"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "fliegenderhollaender", email = "116984393+fliegenderhollaender@users.noreply.github.com" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "matplotlib>=3.11.2",
+    "numpy>=2.5.4",
+    "pandas>=3.0.6",
+    "spyder-kernels>=3.1.6",
+]
+
+[project.scripts]
+cs2 = "cs2:main"
+
+[build-system]
+requires = ["uv_build>=0.13.0,<0.14.0"]
+build-backend = "uv_build"
