@@ -13,7 +13,7 @@ euro_training_df: pd.DataFrame = pd.read_csv("./data/EuroTraining.csv")
 handball_long_df: pd.DataFrame = pd.read_csv("./data/handball_long.csv")
 handball_wide_df: pd.DataFrame = pd.read_csv("./data/handball_wide.csv")
 tennis_df: pd.DataFrame = pd.read_csv("./data/SlamsData.csv")
-
+#added another comment
 #Check for missing values
 print(tennis_df.isna().sum())
 #no missing values
