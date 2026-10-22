@@ -20,16 +20,22 @@ features: list[str] = [
     "UefaPoints",
     "CLPlayers",
 ]
+response_var: str = "Goals"
+
 predictors_train: pd.DataFrame = training_df[features]
 predictors_test: pd.DataFrame = test_df[features]
-response: pd.Series = training_df["Goals"]
-response_test: pd.Series = test_df["Goals"]
+response: pd.Series = training_df[response_var]
+response_test: pd.Series = test_df[response_var]
 
 # fit model
 dtree: DecisionTreeRegressor = DecisionTreeRegressor(random_state=SEED)
 dtree = dtree.fit(predictors_train, response)
 
 # TODO examine the importance of predictors in the regression tree.
+## probably sklearn.inspection.permutation_importance
+## or fitting models without feature and compare score
+## cross validation can be done to make the tree "more rigorous"
+## see at eda and only use correlating regressors
 
 
 y_pred_training: np.ndarray = dtree.predict(predictors_train)
