@@ -24,3 +24,4 @@ graphs/
 *.xls
 *.pdf
 *.csv
+.Rproj.user

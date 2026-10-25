@@ -8,11 +8,11 @@ from sklearn.linear_model import LogisticRegression
 import statsmodels.api as sm
 
 #loading the data
-euro_test_df: pd.DataFrame = pd.read_csv("./data/EuroTest.csv")
-euro_training_df: pd.DataFrame = pd.read_csv("./data/EuroTraining.csv")
-handball_long_df: pd.DataFrame = pd.read_csv("./data/handball_long.csv")
-handball_wide_df: pd.DataFrame = pd.read_csv("./data/handball_wide.csv")
-tennis_df: pd.DataFrame = pd.read_csv("./data/SlamsData.csv")
+euro_test_df: pd.DataFrame = pd.read_csv("../data/EuroTest.csv")
+euro_training_df: pd.DataFrame = pd.read_csv("../data/EuroTraining.csv")
+handball_long_df: pd.DataFrame = pd.read_csv("../data/handball_long.csv")
+handball_wide_df: pd.DataFrame = pd.read_csv("../data/handball_wide.csv")
+tennis_df: pd.DataFrame = pd.read_csv("../data/SlamsData.csv")
 #added another comment
 #Check for missing values
 print(tennis_df.isna().sum())
