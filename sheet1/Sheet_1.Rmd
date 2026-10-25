@@ -1,0 +1,210 @@
+---
+title: "Poisson Regression Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+# Global chunk options
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 5
+)
+
+# Load packages
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(performance)
+
+# Load datasets
+EuroTraining <- read_csv("Documents/Case_study/EuroTraining.csv")
+EuroTest <- read_csv("Documents/Case_study/EuroTest.csv")
+
+```
+
+## 3. Poisson Regression
+
+### 3.1 Fit a Poisson Model
+
+```{r fit-poisson}
+# Fit Poisson regression model
+poisson_model <- glm(
+  Goals ~ GroupStage + GDP + MarketValue + FifaRank + UefaPoints + CLPlayers,
+  data = EuroTraining,
+  family = poisson
+)
+
+# Display model results
+summary(poisson_model)
+```
+
+## 3.2 Check the assumptions of the Poisson model
+
+The main assumption of the Poisson model is equidispersion, i.e. the variance of the response equals its mean. I checked it with two different methods: first, the ratio of the sample variance to the sample mean of `Goals`; second, the Pearson dispersion ratio of the fitted model. In addition, I checked for zero inflation, i.e. whether there are more zeros than a Poisson distribution would predict. Finally, I compared the observed distribution of `Goals` with the theoretical Poisson distribution.
+
+### Method 1: Ratio of variance and mean
+
+```{r var-mean}
+mean(EuroTraining$Goals)
+var(EuroTraining$Goals)
+var(EuroTraining$Goals) / mean(EuroTraining$Goals)
+```
+
+### Method 2: Pearson dispersion ratio
+
+```{r pearson}
+check_overdispersion(poisson_model)
+```
+
+### Zero inflation
+
+```{r zero-inflation}
+check_zeroinflation(poisson_model)
+```
+
+### Observed vs. theoretical Poisson distribution
+
+```{r obs-vs-poisson}
+obs   <- table(EuroTraining$Goals) / nrow(EuroTraining)
+k     <- as.numeric(names(obs))
+exp_p <- dpois(k, lambda = mean(EuroTraining$Goals))
+
+barplot(rbind(as.numeric(obs), exp_p), beside = TRUE, names.arg = k,
+        legend.text = c("observed", "Poisson"), xlab = "Goals")
+```
+
+**Conclusion:** The mean of `Goals` is 1.205 and the variance is 1.253, so the ratio is about 1.04. The Pearson dispersion ratio of the fitted model is 0.92 (p = 0.869), i.e. slightly below 1, so there is no evidence of over dispersion and the equidispersion assumption is reasonably satisfied. For zero inflation, 122 zeros are observed while the model predicts about 127 (ratio 1.04), so there are no more zeros than the Poisson model expects and no zero-inflated model is needed. The bar plot of observed and theoretical frequencies shows the same picture.
+
+## 3.3 Prediction on the training data
+
+I used `predict(..., type = "response")` to obtain the expected number of goals for each match in the training data, and computed the mean absolute error (MAE) between the predicted and the true number of goals.
+
+A single MAE value is hard to interpret on its own, because goals are random and even a perfect model cannot reach an MAE of 0. I therefore added a baseline model that ignores all predictors and always predicts the mean number of goals in the training data. If the Poisson model is useful, its MAE should be clearly lower than the baseline MAE.
+
+```{r pred-train}
+# Predicted expected goals
+pred_train <- predict(poisson_model, type = "response")
+
+# Sanity check: both means should be equal
+mean(pred_train)
+mean(EuroTraining$Goals)
+
+# MAE of the Poisson model
+mae_train <- mean(abs(EuroTraining$Goals - pred_train))
+
+# MAE of the baseline model (always predict the mean)
+mae_base <- mean(abs(EuroTraining$Goals - mean(EuroTraining$Goals)))
+
+# Compare
+data.frame(
+  Model = c("Poisson", "Baseline"),
+  MAE   = c(mae_train, mae_base)
+)
+```
+
+**Interpretation:** The mean of the predicted values equals the mean of the observed goals (1.205), which confirms that the predictions were computed correctly. The Poisson model has a training MAE of 0.838, compared with 0.896 for the baseline, an improvement of about 6.5%. The predictors therefore help, but only a little. This is plausible for football: the number of goals in a match is largely random, and the model predicts an expected value (a decimal number) while the true number of goals is an integer, so the MAE cannot be close to 0 even if the model were correct. Since this is the training data, the result says nothing yet about how well the model generalizes; this is examined in 3.4.
+
+## 3.4 Prediction on the test data
+
+I used the model fitted on the training data to predict the number of goals in the test data via the `newdata` argument; the model was not refitted. For comparison, the baseline model again predicts the mean number of goals of the training data for every test match.
+
+```{r pred-test}
+# Poisson prediction on test data
+pred_test <- predict(poisson_model, newdata = EuroTest, type = "response")
+mae_test  <- mean(abs(EuroTest$Goals - pred_test))
+
+# Baseline prediction on test data (uses the training mean)
+mae_base_test <- mean(abs(EuroTest$Goals - mean(EuroTraining$Goals)))
+
+# Compare
+data.frame(
+  Model        = c("Poisson", "Baseline"),
+  Training_MAE = c(mae_train, mae_base),
+  Test_MAE     = c(mae_test, mae_base_test)
+)
+
+# Relative improvement over the baseline
+(mae_base - mae_train) / mae_base            
+(mae_base_test - mae_test) / mae_base_test
+```
+
+**Interpretation:** On the test data, the Poisson model has an MAE of 0.740, compared with 0.781 for the baseline, an improvement of about 5.3%. The Poisson model therefore predicts better than the baseline also on data it has not seen, so the predictors carry real information and the model generalizes. The improvement is small, however, and slightly smaller than on the training data (6.5%), which is the direction one would expect from out-of-sample prediction. Note that the test MAE (0.740) is lower than the training MAE (0.838); this is not a sign of a better model but of an easier test set, and it is discussed in 3.5.
+
+## 3.5 Is the result expected?
+
+**Training vs. test error.** The test MAE (0.740) is lower than the training MAE (0.838). This is unexpected at first glance: a model is fitted on the training data, so its error on unseen data is usually larger, not smaller.
+
+**Explanation: the test set is easier to predict.** The raw MAE values cannot be compared directly, because the two data sets differ in how hard they are to predict. This is visible in the baseline, which also has a much lower MAE on the test data (0.781) than on the training data (0.896). The test data contain only 102 matches and have a slightly lower mean number of goals (1.147 vs. 1.205), so they probably include relatively more low-scoring matches, which produce smaller errors. With such a small sample, the MAE is also subject to considerable random variation.
+
+```{r compare-relative}
+data.frame(
+  Data        = c("Training", "Test"),
+  n           = c(nrow(EuroTraining), nrow(EuroTest)),
+  Mean_Goals  = c(mean(EuroTraining$Goals), mean(EuroTest$Goals)),
+  Poisson_MAE = c(mae_train, mae_test),
+  Baseline_MAE = c(mae_base, mae_base_test),
+  Improvement = c((mae_base - mae_train) / mae_base,
+                  (mae_base_test - mae_test) / mae_base_test)
+)
+```
+
+**Fair comparison.** A fairer comparison is the improvement relative to the baseline: about 6.5% on the training data and about 5.3% on the test data. These values are similar, and the slightly smaller improvement on the test data is the direction one would expect. There is therefore no sign of overfitting, and the result is consistent with expectations once the difficulty of the data sets is taken into account.
+
+**Size of the improvement.** The improvement over the baseline is small. This is plausible for football: the number of goals in a match is largely random, and the predictors (GDP, market value, etc.) explain only a small part of this randomness. In addition, the model predicts an expected value (a decimal number), whereas the true number of goals is an integer, so the MAE cannot be close to 0 even for a correct model.
+
+## 3.6 Improving the model
+
+**Strategy.** The checks in 3.2 show no over dispersion and no zero inflation, so there is no need for quasi-Poisson, negative binomial or zero-inflated models. In the full model of 3.1 only `GDP` and `MarketValue` are significant, while `FifaRank`, `UefaPoints` and `CLPlayers` all measure the strength of a team and are likely redundant (multicollinearity). `GroupStage` has almost no effect. I therefore tried to improve the model by removing variables. Candidate models were compared on the training data only (likelihood ratio test and AIC); the test MAE is reported at the end and was not used to select the model.
+
+```{r correlation}
+cor(EuroTraining[, c("GDP", "MarketValue", "FifaRank", "UefaPoints", "CLPlayers")])
+```
+
+```{r fit-reduced}
+# Model 2: drop GroupStage, FifaRank, UefaPoints
+p2 <- glm(Goals ~ GDP + MarketValue + CLPlayers,
+          family = poisson, data = EuroTraining)
+
+# Model 3: keep only GDP and MarketValue
+p3 <- glm(Goals ~ GDP + MarketValue,
+          family = poisson, data = EuroTraining)
+
+summary(p3)
+exp(coef(p3))   # multiplicative effect on the expected number of goals
+```
+
+```{r compare-models}
+# Likelihood ratio tests for nested models
+anova(p2, poisson_model, test = "Chisq")   # is dropping 3 variables ok?
+anova(p3, p2, test = "Chisq")              # is dropping CLPlayers ok?
+
+# Test MAE and AIC of all models
+test_mae <- function(m) {
+  mean(abs(EuroTest$Goals - predict(m, newdata = EuroTest, type = "response")))
+}
+
+results <- data.frame(
+  Model = c("Full (6 predictors)", "p2: GDP + MarketValue + CLPlayers",
+            "p3: GDP + MarketValue", "Baseline"),
+  AIC = c(AIC(poisson_model), AIC(p2), AIC(p3), NA),
+  Test_MAE = c(test_mae(poisson_model), test_mae(p2), test_mae(p3), mae_base_test)
+)
+results$Improvement <- (mae_base_test - results$Test_MAE) / mae_base_test
+results
+```
+
+**Results.** Removing `GroupStage`, `FifaRank` and `UefaPoints` increases the deviance by only 1.04 (p = 0.79), so these three variables contribute nothing jointly. The AIC drops from 1068.6 to 1063.6, and the test MAE decreases slightly from 0.740 to 0.730. Removing `CLPlayers` as well is not significant either (p = 0.13); AIC (1063.9) and test MAE (0.731) are practically unchanged. By the principle of parsimony I chose **p3 (`GDP` + `MarketValue`)** as the final model.
+
+**Interpretation.** (Fill in after running `exp(coef(p3))`: a one-unit increase in the difference in `MarketValue` multiplies the expected number of goals by exp(coef), holding `GDP` fixed, and likewise for `GDP`.)
+
+**Conclusion and limitations.**
+
+- The improved model is simpler and predicts at least as well as the full model, but the gain in MAE is tiny. Relative to the baseline, p3 improves the test MAE by about 6.4%, compared with 5.3% for the full model.
+- Differences in test MAE of 0.01 or less should not be over-interpreted: the test set has only 102 matches.
+- Variables were selected using the training data; the test data were used only for the final evaluation. Selecting by test MAE would make the test error optimistic.
+- Each match appears twice (once per team) with mirrored predictors, so the observations are not fully independent and the standard errors may be too small.
+- Because `GDP`, `MarketValue`, `FifaRank`, `UefaPoints` and `CLPlayers` are correlated, a non-significant variable does not mean it has no effect; it may just carry the same information as another variable.
