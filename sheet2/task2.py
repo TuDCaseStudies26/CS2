@@ -69,3 +69,4 @@ grid: GridSearchCV[DecisionTreeRegressor] = GridSearchCV(
 grid = grid.fit(predictors_train, response_train)
 best_model: DecisionTreeRegressor = grid.best_estimator_
 best_params: dict[str, int | float] = grid.best_params_
+

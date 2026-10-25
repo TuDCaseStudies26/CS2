@@ -9,6 +9,10 @@ wheels/
 # MacOs shit
 .DS_Store
 
+# Jupyter
+.ipynb_checkpoints/
+.virtual_documents/
+
 # Virtual environments
 .venv
 
