@@ -17,6 +17,7 @@ dependencies = [
     "pandas>=3.0.6",
     "python-lsp-server>=1.15.0",
     "scikit-learn>=1.9.1",
+    "seaborn>=0.13.2",
     "spyder-kernels>=3.1.6",
 ]
 
