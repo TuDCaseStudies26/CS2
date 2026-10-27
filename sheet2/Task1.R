@@ -1,9 +1,11 @@
 library(rpart)
 library(rpart.plot)
+library(Metrics)
+library(gt)
 
-handball_wide <- read.csv("handball_wide.csv")
-EuroTraining  <- read.csv("EuroTraining.csv")
-tennis        <- read.csv("SlamsData.csv")
+handball_wide <- read.csv("CS2/handball_wide.csv")
+EuroTraining  <- read.csv("CS2/EuroTraining.csv")
+tennis        <- read.csv("CS2/SlamsData.csv")
 
 tennis$win <- factor(tennis$win)   
 levels(tennis$win)                
@@ -19,12 +21,12 @@ tree_eu <- rpart(Goals ~ GroupStage + GDP + MarketValue + FifaRank + UefaPoints 
                  data = EuroTraining, method = "anova")
 
 tree_tn <- rpart(win ~ rank + points + elo + age.30,
-                 data = tennis, method = "class")
+                 data = tennis, method = "class",
+                 control = rpart.control(cp = 0.01))
 # method = "class":classification tree
 
 
 # visualize the tree
-
 tu_green <- "#639A00"
 light_green <- "#E5F0D5"
 dark_green <- "#3F6500"
@@ -34,16 +36,16 @@ dark_gray <- "#333333"
 plot_tree <- function(model, title, extra = 101) {
   rpart.plot(
     model,
-    type = 2,                # Labels below branches
-    extra = extra,           # Additional node information
-    fallen.leaves = TRUE,    # Align terminal nodes
+    type = 2,               
+    extra = extra,         
+    fallen.leaves = TRUE,    
     box.palette = c(light_green, tu_green),
     branch.col = dark_green,
     branch.lwd = 1.5,
     shadow.col = "gray85",
     roundint = FALSE,
-    nn = FALSE,              # Hide node numbers
-    tweak = 1.15,            # Increase text size
+    nn = FALSE,            
+    tweak = 1.15,          
     cex = 0.85,
     main = title,
     under = FALSE
@@ -70,9 +72,6 @@ class_tn <- predict(tree_tn, newdata = tennis, type = "class")
 
 
 # MAE RMSE and baseline
-mae  <- function(y, p) mean(abs(y - p))
-rmse <- function(y, p) sqrt(mean((y - p)^2))
-
 res <- data.frame(
   Data = c("Handball", "Euro"),
   MAE  = c(mae(handball_wide$scorediff, pred_hb), mae(EuroTraining$Goals, pred_eu)),
@@ -84,13 +83,13 @@ res <- data.frame(
 )
 res 
 
-# tennis
+# tennis ratio of correctly predicted
 acc_tn <- mean(class_tn == tennis$win)
 acc_base_tn <- max(prop.table(table(tennis$win)))  
 c(accuracy = acc_tn, baseline = acc_base_tn)
 
 
-# predict error
+# predict error with the largest overestimation and underestimation
 extremes <- function(data, y, pred, n = 5) {
   resid <- pred - y                     
   d <- cbind(data, pred = pred, resid = resid)
@@ -104,13 +103,11 @@ ex_hb$over; ex_hb$under
 ex_eu$over; ex_eu$under
 
 
-tn <- cbind(tennis, prob = prob_tn)
-head(tn[order(tn$prob, decreasing = TRUE), ], 5)  
-head(tn[order(tn$prob), ], 5)                      
-
-
-wrong <- tn[(tn$prob > 0.5) != (tn$win == "1"), ]
-head(wrong[order(abs(wrong$prob - 0.5), decreasing = TRUE), ], 5)
+tn <- cbind(tennis, tree_prob = prob_tn)
+# Highest predicted winning probabilities
+head(tn[order(tn$tree_prob, decreasing = TRUE), ], 5)
+# Lowest predicted winning probabilities
+head(tn[order(tn$tree_prob), ], 5)
 
 
 # predict VS. true
@@ -155,6 +152,8 @@ plot(
 
 abline(0, 1, col = dark_gray, lty = 2, lwd = 2)
 
+
+
 # 3. Tennis
 boxplot(
   prob_tn ~ tennis$win,
@@ -174,16 +173,213 @@ boxplot(
 # Reset layout
 par(mfrow = c(1, 1))
 
+
+
+
 # 1.7 tennis 
 # (a) 
 table(round(prob_tn, 4))
 length(unique(round(prob_tn, 4)))    
 sum(tree_tn$frame$var == "<leaf>")    
 
+#(b)
+cor(tennis[, c("rank", "points", "elo", "age.30")])
+# Correlation with Elo
+cor_tab <- data.frame(
+  Pair = c("Points vs. Elo", "Rank vs. Elo"),
+  Correlation = c(
+    cor(tennis$points, tennis$elo, use = "complete.obs"),
+    cor(tennis$rank, tennis$elo, use = "complete.obs")
+  )
+)
+
+# Create formatted table
+cor_table <- cor_tab |>
+  gt() |>
+  tab_header(
+    title = "Correlation with Elo"
+  ) |>
+  fmt_number(
+    columns = Correlation,
+    decimals = 2
+  ) |>
+  cols_label(
+    Pair = "Variable Pair",
+    Correlation = "Correlation"
+  ) |>
+  cols_align(
+    align = "center",
+    columns = Correlation
+  ) |>
+  cols_width(
+    Pair ~ px(230),
+    Correlation ~ px(150)
+  ) |>
+  tab_style(
+    style = cell_fill(color = "#EAF3EF"),
+    locations = cells_column_labels()
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold"),
+    locations = cells_body(columns = Correlation)
+  ) |>
+  tab_style(
+    style = cell_text(
+      color = "#006B4F",
+      weight = "bold"
+    ),
+    locations = cells_title(groups = "title")
+  ) |>
+  tab_options(
+    table.width = px(380),
+    table.font.size = px(14),
+    data_row.padding = px(12),
+    column_labels.padding = px(10),
+    heading.title.font.size = px(18),
+    heading.title.font.weight = "bold",
+    table.border.top.color = "#006B4F",
+    table.border.bottom.color = "#006B4F",
+    column_labels.border.bottom.color = "#D9E2DD",
+    table_body.hlines.color = "#E8E8E8"
+  )
+cor_table
+
+
+tree_noelo <- rpart(win ~ rank + points + age.30, data = tennis, method = "class")
+mean(predict(tree_noelo, type = "class") == tennis$win)
+tree_noelo$frame$var[1] 
+
+
+
+# Tennis: Training Accuracy Comparison
+acc <- c(
+  "Without Elo" = 0.727,
+  "With Elo\ncp = 0.01\n(2 leaves)" = 0.7505,
+  "With Elo\ncp = 0.001\n(22 leaves)" = 0.7653
+)
+
+# Plot settings
+par(
+  mar = c(7, 7, 3, 2),
+  family = "sans",
+  las = 1,
+  bty = "n"
+)
+
+# Bar chart
+bp <- barplot(
+  unname(acc),
+  ylim = c(0, 0.9),
+  width = 0.65,
+  space = 0.7,
+  col = c(light_green, tu_green, dark_green),
+  border = NA,
+  axes = FALSE,
+  names.arg = rep("", 3),
+  ylab = "",
+  main = ""
+)
+
+# X-axis labels
+mtext(
+  c("Without Elo", "With Elo", "With Elo"),
+  side = 1, at = bp, line = 1,
+  cex = 0.9
+)
+
+# CP values
+mtext(
+  c("cp = 0.01", "cp = 0.001"),
+  side = 1, at = bp[2:3], line = 2.2,
+  cex = 0.85
+)
+
+# Number of leaves
+mtext(
+  c("(2 leaves)", "(22 leaves)"),
+  side = 1, at = bp[2:3], line = 3.4,
+  cex = 0.85
+)
+
+# Y-axis
+axis(
+  2,
+  at = seq(0, 0.9, 0.1),
+  labels = paste0(seq(0, 90, 10), "%"),
+  las = 1,
+  col.axis = dark_gray,
+  col = NA,
+  tick = FALSE
+)
+
+# Subtle horizontal grid lines
+abline(
+  h = seq(0, 0.9, 0.1),
+  col = "#E8E8E8",
+  lty = 1,
+  lwd = 0.8
+)
+
+# Baseline
+abline(
+  h = 0.5,
+  col = dark_gray,
+  lty = 2,
+  lwd = 1.5
+)
+
+# Accuracy labels
+text(
+  x = bp,
+  y = acc + 0.035,
+  labels = sprintf("%.2f%%", acc * 100),
+  cex = 1,
+  font = 2,
+  col = dark_gray
+)
+
+# Baseline label
+text(
+  x = max(bp) + 0.45,
+  y = 0.52,
+  labels = "Baseline: 50%",
+  cex = 0.75,
+  col = dark_gray,
+  adj = 1
+)
+
+# Title
+title(
+  main = "Tennis: Decision Tree Accuracy",
+  cex.main = 1.15,
+  font.main = 2,
+  col.main = "#333333"
+)
+
+mtext(
+  "Training Accuracy",
+  side = 2,
+  line = 4.5,
+  cex = 0.9,
+  col = dark_gray,
+  las = 0
+)
+
+#The original decision tree stops after just one split, using Elo as the splitting variable.
+
+#We found that Elo is correlated with both points and rank, 
+#suggesting that these predictors contain overlapping information.
+
+#When we remove Elo, the tree splits on points instead, achieving a training accuracy of 72.70%, 
+#compared with 75.05% when Elo is included.
+
+#This suggests that Elo captures useful information about player strength, 
+#while the remaining predictors do not provide sufficient additional improvement to justify further splits 
+#under the default complexity parameter.
+
 # (c) 
 printcp(tree_tn)                      
-tree_tn$control$cp                   
-?rpart.control
+
 
 
 
@@ -256,7 +452,7 @@ boxplot(
   names = c("Lost", "Won"),
   xlab = "Actual Match Outcome",
   ylab = "Predicted Win Probability",
-  main = "Tennis | cp = 0.1",
+  main = "Tennis | cp = 0.01",
   col = c(light_green, tu_green),
   border = dark_green,
   medcol = dark_gray,
@@ -287,24 +483,59 @@ par(mfrow = c(1, 1))
 
 
 
-# Create comparison data
+# Compare the two trees (calculated directly from the fitted models)
+tree_summary <- function(model, probability, predicted_class, truth) {
+  node_number <- as.integer(row.names(model$frame))
+
+  c(
+    total_nodes = nrow(model$frame),
+    internal_nodes = sum(model$frame$var != "<leaf>"),
+    terminal_nodes = sum(model$frame$var == "<leaf>"),
+    maximum_depth = max(floor(log2(node_number))),
+    distinct_probabilities = length(unique(round(probability, 4))),
+    training_accuracy = mean(predicted_class == truth)
+  )
+}
+
+summary_cp_001 <- tree_summary(
+  tree_tn, prob_tn, class_tn, tennis$win
+)
+
+summary_cp_0001 <- tree_summary(
+  tree_tn2, prob_tn2, class_tn2, tennis$win
+)
+
+
+# Select four key metrics
+selected_metrics <- c(
+  "Terminal nodes (leaves)",
+  "Maximum depth",
+  "Distinct predicted probabilities",
+  "Training accuracy"
+)
+
 tree_comparison <- data.frame(
-  Metric = c(
-    "Number of leaves",
-    "Distinct predicted probabilities",
-    "Training accuracy"
-  ),
-  `cp = 0.01` = c("2", "2", "0.7505"),
-  `cp = 0.001` = c("22", "19", "0.7653"),
+  Metric = selected_metrics,
+  `cp = 0.01` = unname(summary_cp_001[3:6]),
+  `cp = 0.001` = unname(summary_cp_0001[3:6]),
   check.names = FALSE
 )
 
+# Create formatted table
 tree_table <- tree_comparison |>
   gt() |>
-  fmt(
+  fmt_number(
+    columns = c(`cp = 0.01`, `cp = 0.001`),
+    rows = Metric != "Training accuracy",
+    decimals = 0
+  ) |>
+  fmt_percent(
     columns = c(`cp = 0.01`, `cp = 0.001`),
     rows = Metric == "Training accuracy",
-    fns = function(x) sprintf("%.2f%%", as.numeric(x) * 100)
+    decimals = 2
+  ) |>
+  cols_label(
+    Metric = "Model complexity / performance"
   ) |>
   cols_align(
     align = "center",
@@ -321,6 +552,10 @@ tree_table <- tree_comparison |>
   tab_style(
     style = cell_text(weight = "bold", color = "#006B4F"),
     locations = cells_column_labels()
+  ) |>
+  tab_style(
+    style = cell_text(weight = "bold", color = "#3F6500"),
+    locations = cells_body(columns = Metric)
   ) |>
   tab_options(
     table.width = px(540),
