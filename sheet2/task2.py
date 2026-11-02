@@ -29,7 +29,9 @@ response_train: pd.Series = training_df[response_var]
 response_test: pd.Series = test_df[response_var]
 
 # fit model
-dtree: DecisionTreeRegressor = DecisionTreeRegressor(random_state=SEED)
+dtree: DecisionTreeRegressor = DecisionTreeRegressor(
+        random_state=SEED,
+        )
 dtree = dtree.fit(predictors_train, response_train)
 
 # TODO examine the importance of predictors in the regression tree.
@@ -57,6 +59,7 @@ params: dict[str, list[float | int]] = {
     "ccp_alpha": [0.0, 0.001, 0.005, 0.02, 0.05],
     "min_samples_split": [2, 5, 10, 20, 40],
     "max_depth": [1, 2, 3, 5, 7, 10, 15],
+    "random_state": [SEED]
 }
 
 grid: GridSearchCV[DecisionTreeRegressor] = GridSearchCV(
