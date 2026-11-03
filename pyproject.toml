@@ -19,6 +19,7 @@ dependencies = [
     "scikit-learn>=1.9.1",
     "seaborn>=0.13.2",
     "spyder-kernels>=3.1.6",
+    "xgboost>=3.4.1",
 ]
 
 [project.scripts]
