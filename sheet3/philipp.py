@@ -5,7 +5,7 @@ from sklearn.linear_model import PoissonRegressor
 from sklearn.metrics import mean_absolute_error, root_mean_squared_error
 from sklearn.model_selection import TimeSeriesSplit, GridSearchCV
 from sklearn.neural_network import MLPRegressor
-from sklearn.pipeline import make_pipeline
+from sklearn.pipeline import make_pipeline, Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.tree import DecisionTreeRegressor
 from xgboost import XGBRegressor
@@ -138,3 +138,31 @@ rmse_euro_xgb = root_mean_squared_error(euro_test_pred, xgb_pred)
 print("XGBoost Regressor\nMAE\tRMSE")
 print(*map(lambda x: round(x, 2), (mae_euro_xgb, rmse_euro_xgb)), sep="\t")
 # TODO train neural_network tuning?
+pipe = Pipeline(
+    [
+        ("scaler", StandardScaler()),
+        ("mlp", MLPRegressor(solver="lbfgs", max_iter=1000, random_state=SEED)),
+    ]
+)
+
+params_nn = {
+    "mlp__hidden_layer_sizes": [(5,), (10,), (20,), (10, 5)],
+    "mlp__activation": ["relu", "tanh"],
+    "mlp__alpha": [0.001, 0.01, 0.1],
+}
+
+grid_nn = GridSearchCV(
+    estimator=pipe,
+    param_grid=params_nn,
+    scoring="neg_mean_absolute_error",
+    cv=cv,
+    n_jobs=-1,
+    refit=True,
+)
+
+nn = grid_nn.fit(euro_train_df, euro_train_pred)
+nn_pred = nn.predict(euro_test_df)
+mae_euro_nn = mean_absolute_error(euro_test_pred, nn_pred)
+rmse_euro_nn = root_mean_squared_error(euro_test_pred, nn_pred)
+print("Multi Layer Perceptron\nMAE\tRMSE")
+print(*map(lambda x: round(x, 2), (mae_euro_nn, rmse_euro_nn)), sep="\t")
