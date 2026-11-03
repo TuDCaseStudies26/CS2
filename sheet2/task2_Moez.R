@@ -181,7 +181,7 @@ results <- grid[order(grid$MAE_test), ]
 print(results, row.names = FALSE)
 
 # Display the 10 combinations with lowest test MAE
-head(results, 8)
+head(results, 10)
 
 # there is not a single combination that gives the best metrics for error:
 # cp up to 0.01 + min split 5 or 10 + max depth 3
@@ -320,12 +320,14 @@ grid()
 
 #As the maximum tree depth increases, the training MAE continuously decreases, while 
 #the test MAE increases. This indicates that deeper trees fit the training data more 
-#closely but generalize increasingly poorly to unseen data. The gap between training and 
-#test errors becomes particularly noticeable after depth 2, showing increasing overfitting.
-#The lowest test MAE is achieved at depth 1, suggesting that a simpler tree performs better
-#for this specific hyperparameter configuration (cp = 0, minsplit = 2). Overall, the plot 
-#clearly demonstrates the bias-variance trade-off: increasing model complexity reduces t
-#raining error but leads to worse generalization due to overfitting.
+#closely but generalize increasingly poorly to unseen data. 
+
+#The gap between training and test errors becomes particularly noticeable after depth 2, 
+#showing increasing overfitting. The lowest test MAE is achieved at depth 1, suggesting that 
+#a simpler tree performs better for this specific hyperparameter configuration (cp = 0, minsplit = 2).
+
+#Overall, the plot clearly demonstrates the bias-variance trade-off: increasing model complexity
+#reduces training error but leads to worse generalization due to overfitting.
 
 ######### 8 ##########
 
