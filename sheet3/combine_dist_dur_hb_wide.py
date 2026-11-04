@@ -9,7 +9,7 @@ notdurft = pd.read_csv(dur_path, index_col=0)
 distel = pd.read_csv(dist_path, index_col=0)
 hb_wide_df = pd.read_csv(hb_wide_path)
 
-hb_wide_df["duration_in_mins"] = pd.Series(
+hb_wide_df["duration_in_sec"] = pd.Series(
     notdurft.loc[h, a] for h, a in zip(hb_wide_df["hometeam"], hb_wide_df["awayteam"])
 )
 hb_wide_df["distance_in_meter"] = pd.Series(

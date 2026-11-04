@@ -9,6 +9,9 @@ wheels/
 # MacOs shit
 .DS_Store
 
+# some ide shit
+.idea/
+
 # Jupyter
 .ipynb_checkpoints/
 .virtual_documents/
