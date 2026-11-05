@@ -41,10 +41,11 @@ class Distances:
             self.locator.geocode, min_delay_seconds=1, max_retries=2
         )
         self.teams: dict[str, str] = city_dict
-        self.city_codes: dict[str, tuple[float]] = self.make_city_codes()
+        self.city_codes: pd.DataFrame = self.make_city_codes()
 
-    def make_city_codes(self) -> dict[str, tuple[float]]:
-        res: dict[str, tuple[float]] = dict()
+    def make_city_codes(self) -> pd.DataFrame:
+        res: dict[str, tuple] = dict()
+        hans: pd.DataFrame
         for team, fallback in self.teams.items():
             # get location for team
             team_location = self.geocode(team)
@@ -55,7 +56,11 @@ class Distances:
             # add location latitude and longitude to city_codes
             res[team] = (team_location.latitude, team_location.longitude)
 
-        return res
+            hans = pd.DataFrame.from_dict(
+                res, orient="index", columns=["latitude", "longitude"]
+            )
+            hans.index.name = "team"
+        return hans
 
     def get_distance(self, team_a: str, team_b: str) -> float:
         ok_a, ok_b = self.city_codes.get(team_a, ()), self.teams.get(team_b, ())
@@ -69,11 +74,7 @@ class Distances:
         return distance
 
     def write_city_codes_csv(self, path: str) -> None:
-        tmp = pd.DataFrame.from_dict(
-            self.city_codes, orient="index", columns=["latitude", "longitude"]
-        )
-        tmp.index.name = "team"
-        tmp.to_csv(path)
+        self.city_codes.to_csv(path)
 
 
 if __name__ == "__main__":
