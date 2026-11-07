@@ -1,0 +1,1434 @@
+---
+title: "Sheet_3"
+output: html_document
+date: "2026-11-03"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# 1. Data Preparation
+
+## 1.1 Load Required Packages
+
+The following packages are used for data manipulation, statistical modeling, machine learning, and probability calculations.
+
+```{r setup, message=FALSE, warning=FALSE}
+library(dplyr)
+library(ranger)
+library(rpart)
+library(xgboost)
+library(skellam)
+```
+
+## 1.2 Import Datasets
+
+We use the European Championship dataset for model development and evaluation.
+
+The training dataset contains tournaments from 2004 to 2020, while Euro 2024 serves as the independent test dataset.
+
+```{r import-data}
+train <- read.csv("CS2/EuroTraining.csv")
+test <- read.csv("CS2/EuroTest.csv")
+```
+
+## 1.3 Explore the Training Data
+
+The European Championship expanded from 16 to 24 teams in 2016.
+
+This change affects the number of matches per tournament and motivates the use of macro-averaged RMSE during cross-validation.
+
+```{r data-exploration}
+table(train$Year, train$GroupStage)
+```
+
+## 1.4 Create Match Identifiers
+
+Each football match is represented by two observations, one for each competing team.
+
+We create a match identifier to associate these paired observations.
+
+```{r match-id}
+add_match_id <- function(d) {
+  d$match_id <- ceiling(seq_len(nrow(d)) / 2)
+  d
+}
+
+train <- add_match_id(train)
+test <- add_match_id(test)
+
+# Verify that adjacent rows represent the same match
+stopifnot(
+  all(train$Team[c(TRUE, FALSE)] ==
+      train$Opponent[c(FALSE, TRUE)])
+)
+
+stopifnot(
+  all(test$Team[c(TRUE, FALSE)] ==
+      test$Opponent[c(FALSE, TRUE)])
+)
+```
+
+## 1.5 Select Predictor Variables
+
+Six predictors are included in the initial models:
+
+- GroupStage
+- GDP
+- MarketValue
+- FifaRank
+- UefaPoints
+- CLPlayers
+
+```{r feature-selection}
+feats <- c(
+  "GroupStage",
+  "GDP",
+  "MarketValue",
+  "FifaRank",
+  "UefaPoints",
+  "CLPlayers"
+)
+```
+
+# 2. Cross-Validation Strategy
+
+## 2.1 Leave-One-Tournament-Out Cross-Validation
+
+Leave-One-Tournament-Out (LOTO) cross-validation uses one tournament as the validation set and all remaining tournaments as the training set.
+
+This approach is included for sensitivity analysis.
+
+```{r loto-cv}
+years <- sort(unique(train$Year))
+
+folds_loto <- lapply(years, function(y) {
+  list(
+    year = y,
+    tr = train[train$Year != y, ],
+    val = train[train$Year == y, ]
+  )
+})
+```
+
+## 2.2 Expanding-Window Cross-Validation
+
+Expanding-window cross-validation preserves the chronological order of tournaments.
+
+Only previous tournaments are used to predict a future tournament.
+
+The validation procedure consists of three folds:
+
+| Fold | Training Tournaments   | Validation Tournament |
+|------|------------------------|-----------------------|
+| 1    | 2004, 2008             | 2012                  |
+| 2    | 2004, 2008, 2012       | 2016                  |
+| 3    | 2004, 2008, 2012, 2016 | 2020                  |
+
+This strategy reflects the final prediction task of using historical tournaments to predict Euro 2024.
+
+```{r expanding-window}
+folds_roll <- lapply(years[3:5], function(y) {
+  list(
+    year = y,
+    tr = train[train$Year < y, ],
+    val = train[train$Year == y, ]
+  )
+})
+```
+
+## 2.3 Verify Cross-Validation Folds
+
+```{r check-folds}
+names(folds_loto) <- years
+
+sapply(folds_loto, function(f) {
+  c(
+    val_rows = nrow(f$val),
+    tr_rows = nrow(f$tr)
+  )
+})
+
+names(folds_roll) <- years[3:5]
+
+sapply(folds_roll, function(f) {
+  c(
+    val_rows = nrow(f$val),
+    tr_rows = nrow(f$tr)
+  )
+})
+```
+
+# 3. Evaluation Protocol
+
+## 3.1 Evaluation Metrics
+
+The primary cross-validation strategy is expanding-window CV.
+
+Hyperparameters are selected using macro RMSE, which assigns equal weight to each validation tournament.
+
+Pooled RMSE is also calculated for comparison.
+
+The evaluation metrics are:
+
+**Root Mean Squared Error (RMSE)**
+
+$$RMSE =
+\sqrt{
+\frac{1}{n}
+\sum_{i=1}^{n}
+(y_i-\hat{y}_i)^2
+}$$
+
+**Mean Absolute Error (MAE)**
+
+$$MAE =
+\frac{1}{n}
+\sum_{i=1}^{n}
+|y_i-\hat{y}_i|$$
+
+**Macro RMSE**
+
+$$RMSE_{macro}
+=
+\frac{1}{K}
+\sum_{k=1}^{K}
+RMSE_k$$
+
+**Pooled RMSE**
+
+$$RMSE_{pooled}
+=
+\sqrt{
+\frac{
+\sum_{k=1}^{K}
+\sum_{i=1}^{n_k}
+(y_{ki}-\hat{y}_{ki})^2
+}{
+\sum_{k=1}^{K}n_k
+}
+}$$
+
+```{r evaluation-functions}
+rmse <- function(obs, pred) {
+  sqrt(mean((obs - pred)^2))
+}
+
+mae <- function(obs, pred) {
+  mean(abs(obs - pred))
+}
+
+cv_folds <- folds_roll
+```
+
+## 3.2 General Cross-Validation Function
+
+A common tuning function is implemented to ensure that all models are evaluated under the same cross-validation protocol.
+
+```{r tuning-function}
+tune <- function(folds, grid, fit_fun, pred_fun) {
+
+  results <- lapply(seq_len(nrow(grid)), function(i) {
+
+    params <- grid[i, , drop = FALSE]
+
+    errors <- lapply(folds, function(f) {
+
+      model <- fit_fun(f$tr, params)
+
+      (f$val$Goals - pred_fun(model, f$val))^2
+    })
+
+    data.frame(
+      cv_rmse = mean(
+        sapply(errors, function(e) sqrt(mean(e)))
+      ),
+
+      pooled_rmse = sqrt(mean(unlist(errors)))
+    )
+  })
+
+  cbind(grid, do.call(rbind, results))
+}
+
+tune_cv <- function(grid, fit_fun, pred_fun) {
+  tune(cv_folds, grid, fit_fun, pred_fun)
+}
+
+select_best <- function(res) {
+  res[which.min(res$cv_rmse), ]
+}
+```
+
+# 4. Baseline Model
+
+## 4.1 Baseline Test Performance
+
+The baseline model predicts the average number of goals observed in the training dataset.
+
+It provides a reference point for evaluating whether more sophisticated models improve predictive accuracy.
+
+```{r baseline-test}
+base_pred <- rep(
+  mean(train$Goals),
+  nrow(test)
+)
+
+rmse(test$Goals, base_pred)
+mae(test$Goals, base_pred)
+```
+
+The baseline test results are:
+
+| Metric    | Value    |
+|-----------|----------|
+| Test RMSE | 1.005563 |
+| Test MAE  | 0.780543 |
+
+## 4.2 Baseline Cross-Validation
+
+For each fold, the average number of goals is calculated using only the corresponding training data.
+
+```{r baseline-cv}
+base_errors <- lapply(cv_folds, function(f) {
+
+  pred <- rep(
+    mean(f$tr$Goals),
+    nrow(f$val)
+  )
+
+  (f$val$Goals - pred)^2
+})
+
+base_cv <- data.frame(
+  method = "Baseline",
+
+  cv_rmse = mean(
+    sapply(base_errors, function(e) sqrt(mean(e)))
+  ),
+
+  pooled_rmse = sqrt(mean(unlist(base_errors)))
+)
+
+print(base_cv)
+```
+
+The baseline cross-validation results are:
+
+| Metric         | Value    |
+|----------------|----------|
+| Macro CV RMSE  | 1.118103 |
+| Pooled CV RMSE | 1.122883 |
+
+# 5. Random Forest
+
+## 5.1 Model Specification
+
+Random Forest combines multiple decision trees to predict the number of goals.
+
+The following hyperparameters are tuned:
+
+- `mtry`: Number of candidate predictors considered at each split.
+- `min.node.size`: Minimum size of terminal nodes.
+- `num.trees`: Number of trees, fixed at 500.
+
+```{r rf-functions}
+fit_rf <- function(tr, p) {
+
+  ranger(
+    Goals ~ .,
+    data = tr[, c("Goals", feats)],
+    mtry = p$mtry,
+    min.node.size = p$min.node.size,
+    num.trees = 500,
+    seed = 1
+  )
+}
+
+pred_rf <- function(m, val) {
+  predict(m, val[, feats])$predictions
+}
+```
+
+## 5.2 Hyperparameter Tuning
+
+The hyperparameter grid includes different values of `mtry` and `min.node.size`.
+
+The optimal combination is selected by minimizing macro CV RMSE.
+
+```{r rf-tuning}
+grid_rf <- expand.grid(
+  mtry = 1:length(feats),
+
+  min.node.size = c(
+    10, 20, 30, 50,
+    80, 100, 150, 200
+  )
+)
+
+res_rf <- tune_cv(
+  grid_rf,
+  fit_rf,
+  pred_rf
+)
+
+best_rf <- select_best(res_rf)
+
+best_rf
+```
+
+The optimal hyperparameters are:
+
+| Parameter      | Value    |
+|----------------|----------|
+| mtry           | 2        |
+| min.node.size  | 100      |
+| Macro CV RMSE  | 1.042443 |
+| Pooled CV RMSE | 1.049303 |
+
+## 5.3 Final Model and Test Predictions
+
+The final Random Forest model is trained using all tournaments from 2004 to 2020.
+
+The fitted model is then evaluated on Euro 2024.
+
+```{r rf-test}
+final_rf <- fit_rf(train, best_rf)
+
+pred_test_rf <- pred_rf(final_rf, test)
+
+rmse(test$Goals, pred_test_rf)
+
+mae(test$Goals, pred_test_rf)
+```
+
+The test results are:
+
+| Metric    | Value    |
+|-----------|----------|
+| Test RMSE | 0.979889 |
+| Test MAE  | 0.762601 |
+
+# 6. Classification and Regression Trees (CART)
+
+## 6.1 Model Specification
+
+Two CART models are considered:
+
+1.  ANOVA regression tree
+2.  Poisson regression tree
+
+Both models use the same hyperparameter grid and cross-validation procedure.
+
+```{r cart-functions}
+make_fit_cart <- function(method) {
+
+  function(tr, p) {
+
+    rpart(
+      Goals ~ .,
+
+      data = tr[, c("Goals", feats)],
+
+      method = method,
+
+      control = rpart.control(
+        cp = p$cp,
+        minsplit = p$minsplit,
+        maxdepth = p$maxdepth
+      )
+    )
+  }
+}
+
+fit_cart_anova <- make_fit_cart("anova")
+
+fit_cart_pois <- make_fit_cart("poisson")
+
+pred_cart <- function(m, val) {
+  predict(
+    m,
+    newdata = val[, feats]
+  )
+}
+```
+
+## 6.2 Hyperparameter Tuning
+
+Three hyperparameters are tuned:
+
+- `cp`: Complexity parameter controlling tree pruning.
+- `minsplit`: Minimum number of observations required to attempt a split.
+- `maxdepth`: Maximum depth of the decision tree.
+
+```{r cart-tuning}
+grid_cart <- expand.grid(
+
+  cp = c(
+    0, 0.001, 0.005,
+    0.01, 0.02, 0.05
+  ),
+
+  minsplit = c(
+    2, 5, 10, 20, 40
+  ),
+
+  maxdepth = c(
+    1, 2, 3, 5, 7, 10, 15
+  )
+)
+
+res_cart_anova <- tune_cv(
+  grid_cart,
+  fit_cart_anova,
+  pred_cart
+)
+
+res_cart_pois <- tune_cv(
+  grid_cart,
+  fit_cart_pois,
+  pred_cart
+)
+
+best_cart_anova <- select_best(res_cart_anova)
+
+best_cart_pois <- select_best(res_cart_pois)
+
+rbind(
+  anova = best_cart_anova,
+  poisson = best_cart_pois
+)
+```
+
+The optimal configurations are:
+
+| Model        | cp  | minsplit | maxdepth | CV RMSE  |
+|--------------|-----|----------|----------|----------|
+| CART ANOVA   | 0   | 20       | 2        | 1.047038 |
+| CART Poisson | 0   | 20       | 2        | 1.047545 |
+
+## 6.3 Final Models and Test Performance
+
+```{r cart-test}
+final_cart_anova <- fit_cart_anova(
+  train,
+  best_cart_anova
+)
+
+final_cart_pois <- fit_cart_pois(
+  train,
+  best_cart_pois
+)
+
+p_anova <- pred_cart(
+  final_cart_anova,
+  test
+)
+
+p_pois <- pred_cart(
+  final_cart_pois,
+  test
+)
+
+data.frame(
+  method = c("anova", "poisson"),
+
+  rmse = c(
+    rmse(test$Goals, p_anova),
+    rmse(test$Goals, p_pois)
+  ),
+
+  mae = c(
+    mae(test$Goals, p_anova),
+    mae(test$Goals, p_pois)
+  )
+)
+```
+
+The test results are:
+
+| Model        | Test RMSE | Test MAE |
+|--------------|-----------|----------|
+| CART ANOVA   | 1.008311  | 0.782869 |
+| CART Poisson | 0.997786  | 0.755411 |
+
+# 7. Poisson Regression
+
+## 7.1 Model Specification
+
+Poisson regression models the expected number of goals using a log-link function.
+
+The conditional mean is expressed as:
+
+$$\log(\lambda_i)
+=
+\beta_0+
+\beta_1X_{i1}
++\cdots+
+\beta_pX_{ip}$$
+
+where $\lambda_i$ represents the expected number of goals for observation $i$.
+
+## 7.2 Final Model and Test Predictions
+
+```{r poisson-test}
+fit_pois <- glm(
+  Goals ~ .,
+
+  data = train[, c("Goals", feats)],
+
+  family = poisson
+)
+
+pred_test_pois <- predict(
+  fit_pois,
+  test[, feats],
+  type = "response"
+)
+
+rmse(test$Goals, pred_test_pois)
+
+mae(test$Goals, pred_test_pois)
+```
+
+The test results are:
+
+| Metric    | Value    |
+|-----------|----------|
+| Test RMSE | 0.952883 |
+| Test MAE  | 0.731623 |
+
+## 7.3 Cross-Validation Performance
+
+The Poisson GLM is evaluated using the same expanding-window cross-validation strategy as the other models.
+
+```{r poisson-cv}
+fit_pois_glm <- function(tr, p) {
+
+  glm(
+    Goals ~ .,
+
+    data = tr[, c("Goals", feats)],
+
+    family = poisson
+  )
+}
+
+pred_pois_glm <- function(m, val) {
+
+  predict(
+    m,
+    val[, feats],
+    type = "response"
+  )
+}
+
+res_pois <- tune_cv(
+  data.frame(model = "Poisson"),
+  fit_pois_glm,
+  pred_pois_glm
+)
+
+res_pois
+```
+
+The cross-validation results are:
+
+| Metric         | Value    |
+|----------------|----------|
+| Macro CV RMSE  | 1.044549 |
+| Pooled CV RMSE | 1.048457 |
+
+# 8. Gradient Boosting (XGBoost)
+
+## 8.1 Model Specification
+
+XGBoost is used to investigate whether gradient boosting can improve goal predictions.
+
+Two objective functions are considered:
+
+1.  `count:poisson`: Poisson loss for count data.
+2.  `reg:squarederror`: Squared error loss for regression.
+
+The hyperparameters are selected using expanding-window cross-validation and macro RMSE.
+
+```{r xgb-grid}
+# Verify that all predictors are numeric
+
+stopifnot(
+  all(sapply(train[, feats], is.numeric))
+)
+
+grid_xgb <- expand.grid(
+
+  eta = c(0.01, 0.05, 0.1),
+
+  max_depth = c(2, 3, 4),
+
+  min_child_weight = c(1, 5),
+
+  subsample = c(0.7, 1),
+
+  colsample_bytree = c(0.7, 1)
+)
+```
+
+## 8.2 Hyperparameter Tuning Function
+
+For each hyperparameter combination:
+
+1.  Train a model within each validation fold.
+2.  Record validation RMSE after every boosting round.
+3.  Calculate macro and pooled RMSE across folds.
+4.  Select the number of boosting rounds minimizing macro RMSE.
+
+```{r xgb-tuning-function}
+tune_xgb <- function(
+    folds,
+    grid,
+    objective,
+    max_rounds = 1000
+) {
+
+  out <- lapply(seq_len(nrow(grid)), function(i) {
+
+    p <- grid[i, , drop = FALSE]
+
+    per_fold <- lapply(folds, function(f) {
+
+      dtr <- xgb.DMatrix(
+        as.matrix(f$tr[, feats]),
+        label = f$tr$Goals
+      )
+
+      dva <- xgb.DMatrix(
+        as.matrix(f$val[, feats]),
+        label = f$val$Goals
+      )
+
+      fit <- xgb.train(
+
+        params = list(
+          objective = objective,
+          eval_metric = "rmse",
+
+          eta = p$eta,
+          max_depth = p$max_depth,
+          min_child_weight = p$min_child_weight,
+          subsample = p$subsample,
+          colsample_bytree = p$colsample_bytree,
+
+          seed = 1
+        ),
+
+        data = dtr,
+
+        nrounds = max_rounds,
+
+        evals = list(valid = dva),
+
+        verbose = 0
+      )
+
+      attributes(fit)$evaluation_log$valid_rmse
+    })
+
+    rmse_mat <- do.call(cbind, per_fold)
+
+    n_k <- sapply(
+      folds,
+      function(f) nrow(f$val)
+    )
+
+    macro <- rowMeans(rmse_mat)
+
+    pooled <- sqrt(
+      as.vector(rmse_mat^2 %*% n_k) /
+        sum(n_k)
+    )
+
+    r <- which.min(macro)
+
+    data.frame(
+      nrounds = r,
+      cv_rmse = macro[r],
+      pooled_rmse = pooled[r]
+    )
+  })
+
+  cbind(
+    grid,
+    do.call(rbind, out)
+  )
+}
+```
+
+## 8.3 Model Training Function
+
+The following function performs hyperparameter tuning, trains the final model on all available training observations, and generates predictions for Euro 2024.
+
+```{r xgb-training-function}
+run_xgb <- function(objective) {
+
+  res <- tune_xgb(
+    folds_roll,
+    grid_xgb,
+    objective
+  )
+
+  best <- select_best(res)
+
+  fit <- xgb.train(
+
+    params = list(
+      objective = objective,
+
+      eta = best$eta,
+      max_depth = best$max_depth,
+      min_child_weight = best$min_child_weight,
+      subsample = best$subsample,
+      colsample_bytree = best$colsample_bytree,
+
+      seed = 1
+    ),
+
+    data = xgb.DMatrix(
+      as.matrix(train[, feats]),
+      label = train$Goals
+    ),
+
+    nrounds = best$nrounds,
+
+    verbose = 0
+  )
+
+  list(
+    res = res,
+    best = best,
+    fit = fit,
+
+    pred = predict(
+      fit,
+      as.matrix(test[, feats])
+    )
+  )
+}
+```
+
+## 8.4 Train and Compare XGBoost Models
+
+```{r xgb-models}
+xgb_pois <- run_xgb("count:poisson")
+
+xgb_sq <- run_xgb("reg:squarederror")
+
+rbind(
+  poisson = xgb_pois$best,
+  squared = xgb_sq$best
+)
+
+data.frame(
+
+  objective = c(
+    "count:poisson",
+    "reg:squarederror"
+  ),
+
+  rmse = c(
+    rmse(test$Goals, xgb_pois$pred),
+    rmse(test$Goals, xgb_sq$pred)
+  ),
+
+  mae = c(
+    mae(test$Goals, xgb_pois$pred),
+    mae(test$Goals, xgb_sq$pred)
+  )
+)
+```
+
+## 8.5 Variable Importance
+
+Variable importance is extracted from the final XGBoost model using the Poisson objective.
+
+```{r xgb-importance}
+imp <- xgb.importance(
+  feature_names = feats,
+  model = xgb_pois$fit
+)
+
+print(head(imp, 10))
+
+xgb.plot.importance(
+  imp,
+  top_n = 10
+)
+```
+
+# 9. Model Comparison
+
+## 9.1 Comparison of Predictive Performance
+
+The models are compared using:
+
+- Macro CV RMSE
+- Test RMSE
+- Test MAE
+
+All models are evaluated on the same Euro 2024 test dataset.
+
+```{r model-comparison}
+model_comparison <- data.frame(
+
+  Model = c(
+    "Baseline",
+    "Poisson GLM",
+    "CART (ANOVA)",
+    "CART (Poisson)",
+    "Random Forest",
+    "XGBoost (Poisson)",
+    "XGBoost (Squared)"
+  ),
+
+  CV_RMSE = c(
+    base_cv$cv_rmse,
+    res_pois$cv_rmse,
+    best_cart_anova$cv_rmse,
+    best_cart_pois$cv_rmse,
+    best_rf$cv_rmse,
+    xgb_pois$best$cv_rmse,
+    xgb_sq$best$cv_rmse
+  ),
+
+  Test_RMSE = c(
+    rmse(test$Goals, base_pred),
+    rmse(test$Goals, pred_test_pois),
+    rmse(test$Goals, p_anova),
+    rmse(test$Goals, p_pois),
+    rmse(test$Goals, pred_test_rf),
+    rmse(test$Goals, xgb_pois$pred),
+    rmse(test$Goals, xgb_sq$pred)
+  ),
+
+  Test_MAE = c(
+    mae(test$Goals, base_pred),
+    mae(test$Goals, pred_test_pois),
+    mae(test$Goals, p_anova),
+    mae(test$Goals, p_pois),
+    mae(test$Goals, pred_test_rf),
+    mae(test$Goals, xgb_pois$pred),
+    mae(test$Goals, xgb_sq$pred)
+  )
+)
+
+print(model_comparison)
+```
+
+# 10. Skellam Distribution
+
+## 10.1 From Goal Predictions to Match Outcomes
+
+The previous models predict the expected number of goals for each team.
+
+To obtain probabilities for three possible match outcomes, we use the Skellam distribution.
+
+Assuming two independent Poisson-distributed goal counts,
+
+$$X \sim Poisson(\lambda_1)$$
+
+$$Y \sim Poisson(\lambda_2)$$
+
+the goal difference follows a Skellam distribution:
+
+$$D = X-Y
+\sim Skellam(\lambda_1,\lambda_2)$$
+
+The possible outcomes are:
+
+- Win: $D>0$
+- Draw: $D=0$
+- Loss: $D<0$
+
+## 10.2 Collect Model Predictions
+
+```{r collect-predictions}
+preds <- list(
+
+  base = base_pred,
+
+  pois_1 = pred_test_pois,
+
+  anova = p_anova,
+
+  pois_2 = p_pois,
+
+  rf = pred_test_rf,
+
+  xgb_pois = xgb_pois$pred,
+
+  xgb_sq = xgb_sq$pred
+)
+```
+
+## 10.3 Calculate Match Outcome Probabilities
+
+Each match contains two team-level observations.
+
+The predictions are paired to obtain the expected goals for both teams.
+
+The Skellam distribution is then used to calculate win, draw, and loss probabilities.
+
+```{r skellam-probabilities}
+to_skellam <- function(pred, test) {
+
+  # Ensure positive expected goal values
+  lam <- pmax(
+    as.numeric(pred),
+    0.01
+  )
+
+  data.frame(
+    match_id = test$match_id,
+    goals = test$Goals,
+    lam = lam
+  ) %>%
+
+    group_by(match_id) %>%
+
+    mutate(
+      lam1 = lam,
+
+      # Expected goals of the opponent
+      lam2 = rev(lam),
+
+      diff = goals - rev(goals)
+    ) %>%
+
+    # Retain one observation per match
+    slice(1) %>%
+
+    ungroup() %>%
+
+    mutate(
+
+      p_win = 1 - pskellam(
+        0,
+        lam1,
+        lam2
+      ),
+
+      p_draw = dskellam(
+        0,
+        lam1,
+        lam2
+      ),
+
+      p_loss = pskellam(
+        -1,
+        lam1,
+        lam2
+      ),
+
+      # Observed match outcome
+      # 1 = win, 0 = draw, -1 = loss
+      y = sign(diff)
+    )
+}
+```
+
+# 11. Evaluation of Match Outcome Probabilities
+
+## 11.1 Evaluation Metrics
+
+Four metrics are considered:
+
+**Log Loss**
+
+Log Loss measures the quality of predicted probabilities and heavily penalizes confident incorrect predictions.
+
+**Brier Score**
+
+The multiclass Brier Score measures the squared differences between predicted probabilities and observed outcomes.
+
+**Ranked Probability Score (RPS)**
+
+RPS evaluates probabilistic predictions for ordered outcomes by comparing cumulative probabilities.
+
+**Accuracy**
+
+Accuracy measures the proportion of matches for which the most probable outcome matches the observed result.
+
+For Log Loss, Brier Score, and RPS, lower values indicate better predictions.
+
+For Accuracy, higher values indicate better performance.
+
+## 11.2 Evaluation Function
+
+```{r outcome-evaluation}
+eval_probs <- function(res) {
+
+  P <- as.matrix(
+    res[, c("p_win", "p_draw", "p_loss")]
+  )
+
+  Y <- cbind(
+    res$y == 1,
+    res$y == 0,
+    res$y == -1
+  ) * 1
+
+  p_true <- rowSums(P * Y)
+
+  cumP <- t(
+    apply(P, 1, cumsum)
+  )
+
+  cumY <- t(
+    apply(Y, 1, cumsum)
+  )
+
+  c(
+
+    logloss = -mean(
+      log(pmax(p_true, 1e-15))
+    ),
+
+    brier = mean(
+      rowSums((P - Y)^2)
+    ),
+
+    rps = mean(
+      rowSums(
+        (cumP - cumY)[, 1:2]^2
+      ) / 2
+    ),
+
+    accuracy = mean(
+      c(1, 0, -1)[
+        max.col(
+          P,
+          ties.method = "first"
+        )
+      ] == res$y
+    )
+  )
+}
+```
+
+## 11.3 Compare Match Outcome Predictions
+
+```{r skellam-comparison}
+skellam_res <- lapply(
+  preds,
+  to_skellam,
+  test = test
+)
+
+results <- t(
+  sapply(
+    skellam_res,
+    eval_probs
+  )
+)
+
+round(results, 4)
+```
+
+# 12. Bootstrap Analysis
+
+## 12.1 Motivation
+
+The Euro 2024 test dataset contains a relatively small number of matches.
+
+Bootstrap resampling is used to assess the uncertainty of performance metrics and compare predictive models.
+
+Because each match is represented by two team-level observations, resampling is performed at the match level.
+
+We use 10,000 bootstrap replications.
+
+## 12.2 Calculate Match-Level Losses
+
+The first step is to calculate the loss for each match and model.
+
+Three proper scoring rules are considered:
+
+- Log Loss
+- Brier Score
+- Ranked Probability Score
+
+```{r bootstrap-losses}
+match_loss <- function(res) {
+
+  P <- as.matrix(
+    res[, c("p_win", "p_draw", "p_loss")]
+  )
+
+  Y <- cbind(
+    res$y == 1,
+    res$y == 0,
+    res$y == -1
+  ) * 1
+
+  p_true <- rowSums(P * Y)
+
+  cumP <- t(
+    apply(P, 1, cumsum)
+  )
+
+  cumY <- t(
+    apply(Y, 1, cumsum)
+  )
+
+  data.frame(
+
+    logloss = -log(
+      pmax(p_true, 1e-15)
+    ),
+
+    brier = rowSums(
+      (P - Y)^2
+    ),
+
+    rps = rowSums(
+      (cumP - cumY)[, 1:2]^2
+    ) / 2
+  )
+}
+
+losses <- lapply(
+  skellam_res,
+  match_loss
+)
+```
+
+## 12.3 Generate Bootstrap Samples
+
+The same bootstrap indices are used for all models.
+
+This paired resampling design preserves the correspondence between predictions made for the same matches.
+
+```{r bootstrap-sampling}
+set.seed(42)
+
+B <- 10000
+
+n <- nrow(losses[[1]])
+
+idx <- matrix(
+  sample(
+    n,
+    n * B,
+    replace = TRUE
+  ),
+  nrow = n
+)
+
+boot_mean <- function(x) {
+
+  colMeans(
+    matrix(
+      x[idx],
+      nrow = n
+    )
+  )
+}
+```
+
+## 12.4 Bootstrap Confidence Intervals
+
+We construct 95% percentile bootstrap confidence intervals for each model and evaluation metric.
+
+```{r bootstrap-ci}
+ci_table <- do.call(
+  rbind,
+
+  lapply(names(losses), function(m) {
+
+    do.call(
+      rbind,
+
+      lapply(
+        c("logloss", "brier", "rps"),
+        function(k) {
+
+          b <- boot_mean(
+            losses[[m]][[k]]
+          )
+
+          data.frame(
+            model = m,
+
+            metric = k,
+
+            mean = mean(
+              losses[[m]][[k]]
+            ),
+
+            lo = unname(
+              quantile(b, 0.025)
+            ),
+
+            hi = unname(
+              quantile(b, 0.975)
+            )
+          )
+        }
+      )
+    )
+  })
+)
+
+ci_table
+```
+
+## 12.5 Paired Bootstrap Model Comparison
+
+We compare each model against a reference model using differences in match-level losses.
+
+The difference is defined as:
+
+$$\Delta =
+Loss_{model}
+-
+Loss_{reference}$$
+
+Interpretation:
+
+- $\Delta < 0$: The evaluated model performs better than the reference.
+- $\Delta > 0$: The reference model performs better.
+- A 95% confidence interval containing zero indicates that the bootstrap results do not provide clear evidence of a performance difference at the corresponding two-sided 5% level.
+
+The `prob_better` variable records the proportion of bootstrap samples in which the evaluated model has a lower average loss.
+
+```{r bootstrap-difference}
+boot_diff <- function(
+    model,
+    ref,
+    metric
+) {
+
+  d <- losses[[model]][[metric]] -
+    losses[[ref]][[metric]]
+
+  b <- boot_mean(d)
+
+  data.frame(
+
+    model = model,
+
+    ref = ref,
+
+    metric = metric,
+
+    diff = mean(d),
+
+    lo = unname(
+      quantile(b, 0.025)
+    ),
+
+    hi = unname(
+      quantile(b, 0.975)
+    ),
+
+    prob_better = mean(b < 0)
+  )
+}
+
+metrics <- c(
+  "logloss",
+  "brier",
+  "rps"
+)
+```
+
+## 12.6 Comparison Against the Baseline
+
+Each predictive model is compared against the baseline.
+
+```{r bootstrap-vs-baseline}
+vs_base <- do.call(
+  rbind,
+
+  lapply(
+    setdiff(names(losses), "base"),
+
+    function(m) {
+
+      do.call(
+        rbind,
+
+        lapply(
+          metrics,
+
+          function(k) {
+            boot_diff(
+              m,
+              "base",
+              k
+            )
+          }
+        )
+      )
+    }
+  )
+)
+
+vs_base
+```
+
+## 12.7 Comparison Against Random Forest
+
+All other models are compared against Random Forest using the same paired bootstrap procedure.
+
+```{r bootstrap-vs-rf}
+vs_rf <- do.call(
+  rbind,
+
+  lapply(
+    setdiff(names(losses), "rf"),
+
+    function(m) {
+
+      do.call(
+        rbind,
+
+        lapply(
+          metrics,
+
+          function(k) {
+            boot_diff(
+              m,
+              "rf",
+              k
+            )
+          }
+        )
+      )
+    }
+  )
+)
+
+vs_rf
+```
+
+# 13. Summary
+
+This analysis develops and evaluates several predictive models for European Championship football matches.
+
+The modeling framework consists of three main stages.
+
+**Stage 1: Goal Prediction**
+
+Different statistical and machine learning methods are trained to predict the number of goals scored by each team.
+
+**Stage 2: Match Outcome Prediction**
+
+Expected goals are converted into win, draw, and loss probabilities using the Skellam distribution.
+
+**Stage 3: Model Comparison and Uncertainty**
+
+The models are evaluated using RMSE, MAE, Log Loss, Brier Score, RPS, and Accuracy.
+
+Bootstrap resampling is used to quantify uncertainty and compare predictive performance.
+
+The final model comparison should consider both predictive accuracy and uncertainty rather than relying only on small differences in point estimates.
